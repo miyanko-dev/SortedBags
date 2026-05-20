@@ -170,13 +170,13 @@ end
 ------------------------------------------------------------------------
 
 local function isSafeNow()
-	if InCombatLockdown() then return false, "Cannot sort in combat." end
-	if CursorHasItem() then return false, "Drop the item on your cursor first." end
-	if MerchantFrame and MerchantFrame:IsShown() then return false, "Close the merchant first." end
-	if BankFrame and BankFrame:IsShown() then return false, "Close the bank first." end
-	if TradeFrame and TradeFrame:IsShown() then return false, "Cannot sort during trade." end
-	if MailFrame and MailFrame:IsShown() then return false, "Close the mailbox first." end
-	if AuctionFrame and AuctionFrame:IsShown() then return false, "Close the auction house first." end
+	if InCombatLockdown() then return false, "Cannot sort in combat" end
+	if CursorHasItem() then return false, "Drop the item on your cursor first" end
+	if MerchantFrame and MerchantFrame:IsShown() then return false, "Close the merchant first" end
+	if BankFrame and BankFrame:IsShown() then return false, "Close the bank first" end
+	if TradeFrame and TradeFrame:IsShown() then return false, "Cannot sort during trade" end
+	if MailFrame and MailFrame:IsShown() then return false, "Close the mailbox first" end
+	if AuctionFrame and AuctionFrame:IsShown() then return false, "Close the auction house first" end
 	return true
 end
 
@@ -483,7 +483,7 @@ function ns.Sort()
 
 	local ok, reason = isSafeNow()
 	if not ok then
-		print("|cffffff00[SortedBags]:|r " .. reason)
+		UIErrorsFrame:AddMessage(reason, 1.0, 0.1, 0.1)
 		return
 	end
 

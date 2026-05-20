@@ -1,8 +1,5 @@
 local _, ns = ...
 
-local SORT_ICON    = 135464
-local OPTIONS_ICON = 134063
-
 ------------------------------------------------------------------------
 -- Flag labels. Pull from Blizzard's localized class names so the menu
 -- auto-localizes; fall back to literal English if a string is missing.
@@ -100,15 +97,42 @@ local function buildBagMenu(_, level)
 	end
 	UIDropDownMenu_AddButton(info, level)
 
-	info = UIDropDownMenu_CreateInfo()
-	info.text = "Reset bag categories"
-	info.notCheckable = true
-	info.func = function()
-		ns.resetBag(menuBag)
-		dimPortrait(menuFrame)
-		CloseDropDownMenus()
+	-- Global options only on the backpack menu — they apply to everything,
+	-- so duplicating them on every bag would be noise.
+	if menuBag == 0 then
+		info = UIDropDownMenu_CreateInfo()
+		info.text = ""
+		info.isTitle = true
+		info.notCheckable = true
+		info.disabled = true
+		UIDropDownMenu_AddButton(info, level)
+
+		info = UIDropDownMenu_CreateInfo()
+		info.text = "General Options"
+		info.isTitle = true
+		info.notCheckable = true
+		UIDropDownMenu_AddButton(info, level)
+
+		info = UIDropDownMenu_CreateInfo()
+		info.text = "Sort right-to-left"
+		info.isNotRadio = true
+		info.keepShownOnClick = true
+		info.checked = function() return SortedBagsDB.rightToLeft and true or false end
+		info.func = function(_, _, _, checked)
+			SortedBagsDB.rightToLeft = checked and true or false
+		end
+		UIDropDownMenu_AddButton(info, level)
+
+		info = UIDropDownMenu_CreateInfo()
+		info.text = "Loot fills right-to-left"
+		info.isNotRadio = true
+		info.keepShownOnClick = true
+		info.checked = function() return not C_Container.GetInsertItemsLeftToRight() end
+		info.func = function(_, _, _, checked)
+			C_Container.SetInsertItemsLeftToRight(not checked)
+		end
+		UIDropDownMenu_AddButton(info, level)
 	end
-	UIDropDownMenu_AddButton(info, level)
 
 	info = UIDropDownMenu_CreateInfo()
 	info.text = CLOSE or "Close"
@@ -125,7 +149,8 @@ local function ensureBagMenu()
 end
 
 ------------------------------------------------------------------------
--- Portrait click overlay
+-- Portrait click overlay. Backpack: left-click sorts, right-click menu.
+-- Other bags: right-click menu only.
 ------------------------------------------------------------------------
 
 local function attachPortraitClick(frame)
@@ -133,28 +158,86 @@ local function attachPortraitClick(frame)
 	local portrait = _G[frame:GetName() .. "Portrait"]
 	if not portrait then return end
 
+	local isBackpack = frame:GetID() == 0
+
+	-- Blizzard's PortraitButton has no OnClick but still consumes mouse input
+	-- (and its own OnEnter tooltip overrides ours). Disabling its mouse lets
+	-- our overlay button receive every click and lets our tooltip show through.
+	local pb = _G[frame:GetName() .. "PortraitButton"]
+	if pb and pb.EnableMouse then pb:EnableMouse(false) end
+
 	local btn = CreateFrame("Button", nil, frame)
 	btn:SetAllPoints(portrait)
 	btn:SetFrameLevel(frame:GetFrameLevel() + 5)
-	btn:RegisterForClicks("RightButtonUp")
+	if isBackpack then
+		btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+	else
+		btn:RegisterForClicks("RightButtonUp")
+	end
 
-	btn:SetScript("OnClick", function(self)
+	btn:SetScript("OnClick", function(self, button)
+		if button == "LeftButton" then
+			ns.Sort()
+			return
+		end
 		ensureBagMenu()
 		menuFrame = frame
 		menuBag   = frame:GetID()
 		ToggleDropDownMenu(1, nil, bagMenu, self, 0, 0)
 	end)
 
+	-- Translucent black overlay for hover/press feedback — only on the backpack,
+	-- since that's the one that actually acts as a sort button. Other bags just
+	-- get the right-click category menu and shouldn't visually behave like
+	-- buttons. SetVertexColor on the native portrait is silently no-op'd in
+	-- Classic Era 1.15 (the C-side C_Container.SetBagPortraitTexture pipeline
+	-- ignores subsequent Lua color changes), so we paint a thin dim layer on
+	-- top instead. Masked to the same circular alpha Blizzard uses so the dim
+	-- matches the portrait socket.
+	local dim
+	if isBackpack then
+		dim = btn:CreateTexture(nil, "OVERLAY")
+		dim:SetColorTexture(0, 0, 0, 1)
+		dim:SetAllPoints(btn)
+		dim:SetAlpha(0)
+		pcall(function()
+			local mask = btn:CreateMaskTexture()
+			mask:SetTexture("Interface\\CharacterFrame\\TempPortraitAlphaMask",
+				"CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+			mask:SetAllPoints(dim)
+			dim:AddMaskTexture(mask)
+		end)
+	end
+
 	btn:SetScript("OnEnter", function(self)
+		if dim then dim:SetAlpha(0.3) end
 		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-		GameTooltip:SetText("SortedBags")
-		GameTooltip:AddLine("Right-click to assign categories.", 1, 1, 1, true)
+		if isBackpack then
+			GameTooltip:SetText("SortedBags")
+			GameTooltip:AddLine("Left-click to sort.", 1, 1, 1, true)
+			GameTooltip:AddLine("Right-click for categories and options.", 1, 1, 1, true)
+		else
+			GameTooltip:SetText("SortedBags")
+			GameTooltip:AddLine("Right-click to assign categories.", 1, 1, 1, true)
+		end
 		GameTooltip:Show()
 	end)
-	btn:SetScript("OnLeave", GameTooltip_Hide)
+	btn:SetScript("OnLeave", function(self)
+		if dim then dim:SetAlpha(0) end
+		GameTooltip:Hide()
+	end)
+	-- OnMouseDown / OnMouseUp give a stronger "pressed" dim distinct from hover.
+	-- OnClick fires on release, so this feedback runs in parallel with sort/menu.
+	if isBackpack then
+		btn:SetScript("OnMouseDown", function(self)
+			dim:SetAlpha(0.55)
+		end)
+		btn:SetScript("OnMouseUp", function(self)
+			dim:SetAlpha(self:IsMouseOver() and 0.3 or 0)
+		end)
+	end
 
 	frame.SortedBagsPortraitHook = btn
-	dimPortrait(frame)
 
 	-- Close our dropdown when the bag it belongs to is closed, otherwise
 	-- the menu lingers floating after the bag window disappears.
@@ -163,141 +246,6 @@ local function attachPortraitClick(frame)
 			CloseDropDownMenus()
 		end
 	end)
-end
-
-------------------------------------------------------------------------
--- Config panel (just the two right-to-left toggles now)
-------------------------------------------------------------------------
-
-local sortButton, configButton, configPanel
-
-local function makeCheckbox(parent, name, label, getCurrent, setCurrent)
-	local cb = CreateFrame("CheckButton", name, parent, "UICheckButtonTemplate")
-	cb:SetSize(24, 24)
-	local fs = cb.Text or cb.text or _G[name .. "Text"]
-	if fs then
-		fs:SetText(label)
-		fs:SetFontObject("GameFontHighlight")
-	end
-	cb:SetChecked(getCurrent() and true or false)
-	cb:SetScript("OnClick", function(self)
-		setCurrent(self:GetChecked() and true or false)
-	end)
-	return cb
-end
-
-local function buildConfigPanel()
-	if configPanel then return configPanel end
-
-	local f = CreateFrame("Frame", "SortedBagsConfigPanel", UIParent, "BasicFrameTemplateWithInset")
-	f:SetSize(280, 120)
-	f:SetPoint("CENTER")
-	f:SetFrameStrata("DIALOG")
-	f:SetMovable(true)
-	f:EnableMouse(true)
-	f:RegisterForDrag("LeftButton")
-	f:SetScript("OnDragStart", f.StartMoving)
-	f:SetScript("OnDragStop", f.StopMovingOrSizing)
-	f:Hide()
-
-	if f.TitleText then f.TitleText:SetText("SortedBags Options") end
-
-	local sortCheck = makeCheckbox(f, "SortedBagsReverseSortCheck", "Sort right-to-left",
-		function() return SortedBagsDB.rightToLeft end,
-		function(v) SortedBagsDB.rightToLeft = v end)
-	sortCheck:SetPoint("TOPLEFT", f, "TOPLEFT", 16, -34)
-
-	local lootCheck = makeCheckbox(f, "SortedBagsReverseLootCheck", "Loot fills right-to-left",
-		function() return not C_Container.GetInsertItemsLeftToRight() end,
-		function(v) C_Container.SetInsertItemsLeftToRight(not v) end)
-	lootCheck:SetPoint("TOPLEFT", sortCheck, "BOTTOMLEFT", 0, -2)
-
-	-- Re-read live state on every show — the user may have toggled loot
-	-- direction via /run or the native UI since the panel was built.
-	f:HookScript("OnShow", function()
-		sortCheck:SetChecked(SortedBagsDB.rightToLeft and true or false)
-		lootCheck:SetChecked(not C_Container.GetInsertItemsLeftToRight())
-	end)
-
-	configPanel = f
-	return f
-end
-
-local function toggleConfigPanel()
-	ns.ensureDB()
-	local panel = buildConfigPanel()
-	if panel:IsShown() then
-		panel:Hide()
-	else
-		panel:Show()
-	end
-end
-ns.toggleConfigPanel = toggleConfigPanel
-
-------------------------------------------------------------------------
--- Backpack buttons (gear + sort)
-------------------------------------------------------------------------
-
-local function attachConfigButton()
-	if configButton or not ContainerFrame1 then return end
-
-	local btn = CreateFrame("Button", "SortedBagsConfigButton", ContainerFrame1)
-	btn:SetSize(20, 20)
-	btn:SetPoint("RIGHT", ContainerFrame1CloseButton, "LEFT", 2, 0)
-	btn:SetFrameLevel(ContainerFrame1:GetFrameLevel() + 10)
-
-	btn:SetNormalTexture(OPTIONS_ICON)
-	btn:SetPushedTexture(OPTIONS_ICON)
-	local pushed = btn:GetPushedTexture()
-	if pushed then pushed:SetVertexColor(0.7, 0.7, 0.7) end
-
-	local hl = btn:CreateTexture(nil, "HIGHLIGHT")
-	hl:SetTexture(OPTIONS_ICON)
-	hl:SetBlendMode("ADD")
-	hl:SetAlpha(0.3)
-	hl:SetAllPoints(btn)
-
-	btn:SetScript("OnClick", toggleConfigPanel)
-	btn:SetScript("OnEnter", function(self)
-		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-		GameTooltip:SetText("SortedBags Options")
-		GameTooltip:AddLine("Also available via /sb.", 0.7, 0.7, 0.7, true)
-		GameTooltip:Show()
-	end)
-	btn:SetScript("OnLeave", GameTooltip_Hide)
-
-	configButton = btn
-end
-
-local function attachSortButton()
-	if sortButton or not ContainerFrame1 then return end
-
-	local btn = CreateFrame("Button", "SortedBagsSortButton", ContainerFrame1)
-	btn:SetSize(20, 20)
-	btn:SetPoint("RIGHT", SortedBagsConfigButton, "LEFT", -4, 0)
-	btn:SetFrameLevel(ContainerFrame1:GetFrameLevel() + 10)
-
-	btn:SetNormalTexture(SORT_ICON)
-	btn:SetPushedTexture(SORT_ICON)
-	local pushed = btn:GetPushedTexture()
-	if pushed then pushed:SetVertexColor(0.7, 0.7, 0.7) end
-
-	local hl = btn:CreateTexture(nil, "HIGHLIGHT")
-	hl:SetTexture(SORT_ICON)
-	hl:SetBlendMode("ADD")
-	hl:SetAlpha(0.3)
-	hl:SetAllPoints(btn)
-
-	btn:SetScript("OnClick", function() ns.Sort() end)
-	btn:SetScript("OnEnter", function(self)
-		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-		GameTooltip:SetText("Sort Bags")
-		GameTooltip:AddLine("Right-click a bag's portrait to assign categories.", 0.7, 0.7, 0.7, true)
-		GameTooltip:Show()
-	end)
-	btn:SetScript("OnLeave", GameTooltip_Hide)
-
-	sortButton = btn
 end
 
 ------------------------------------------------------------------------
@@ -310,9 +258,6 @@ local function onContainerShown(frame)
 end
 
 local function init()
-	attachConfigButton()
-	attachSortButton()
-
 	if ContainerFrame1Name then
 		ContainerFrame1Name:SetText("")
 		ContainerFrame1Name:Hide()
@@ -337,10 +282,3 @@ boot:SetScript("OnEvent", function()
 	init()
 	boot:UnregisterEvent("PLAYER_LOGIN")
 end)
-
-------------------------------------------------------------------------
--- /sb slash command
-------------------------------------------------------------------------
-
-SLASH_SORTEDBAGSCONFIG1 = "/sb"
-SlashCmdList["SORTEDBAGSCONFIG"] = function() toggleConfigPanel() end
