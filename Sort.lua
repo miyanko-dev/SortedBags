@@ -6,12 +6,11 @@ local BAG_CONTAINERS = {0, 1, 2, 3, 4}
 ns.BAG_CONTAINERS = BAG_CONTAINERS
 
 ------------------------------------------------------------------------
--- Bag category flags (ported from Retail's Enum.BagSlotFlags, but bit
--- values are addon-local since Classic Era doesn't expose the native
--- C_Container.SetBagSlotFlag flow). A bag can carry any combination of
--- flags; items routed in Retail's canonical order (Hearthstone first by
--- explicit user preference; then Gear, Consumable, Trade Goods, Reagent,
--- Junk, Quest in the Retail order; Mount + Misc last).
+-- Bag category flags. A bag can carry any combination. Bit values are
+-- persisted in SortedBagsDB.bagFlags — don't change them. 0x080 is
+-- reserved (was MOUNT before mounts were merged into MISC) so future
+-- flags don't collide with legacy saves. Slot priority within a bag
+-- comes from FLAG_DEFAULT_ORDER below.
 ------------------------------------------------------------------------
 
 local FLAG = {
@@ -22,21 +21,19 @@ local FLAG = {
 	REAGENT     = 0x010,
 	JUNK        = 0x020,
 	QUEST       = 0x040,
-	MOUNT       = 0x080,
 	MISC        = 0x100,
 }
 ns.FLAG = FLAG
 
 local FLAG_DEFAULT_ORDER = {
 	FLAG.HEARTHSTONE,
-	FLAG.GEAR,
-	FLAG.CONSUMABLE,
-	FLAG.TRADE_GOODS,
-	FLAG.REAGENT,
-	FLAG.JUNK,
-	FLAG.QUEST,
-	FLAG.MOUNT,
 	FLAG.MISC,
+	FLAG.REAGENT,
+	FLAG.CONSUMABLE,
+	FLAG.GEAR,
+	FLAG.TRADE_GOODS,
+	FLAG.QUEST,
+	FLAG.JUNK,
 }
 ns.FLAG_DEFAULT_ORDER = FLAG_DEFAULT_ORDER
 
@@ -45,20 +42,28 @@ for i, f in ipairs(FLAG_DEFAULT_ORDER) do FLAG_ORDER[f] = i end
 local FLAG_UNKNOWN_RANK = #FLAG_DEFAULT_ORDER + 1
 
 ------------------------------------------------------------------------
--- Item → category flag. Junk check runs first so a gray sword lands in
--- the Junk bag, not the Gear bag — same precedence Retail uses.
+-- Item → category flag. Categories map to Blizzard's Enum.ItemClass
+-- (literal IDs because Enum may not be populated at addon-load time in
+-- 1.15.x):
+--   0 Consumable   2 Weapon   4 Armor   5 Reagent   6 Projectile
+--   7 Tradegoods   9 Recipe   12 Questitem   13 Key   15 Miscellaneous
+-- Container/Projectile/Key/Miscellaneous all share the MISC bucket;
+-- Classic Era 1.15.x can't reliably distinguish mount items from other
+-- Misc items via subClassID. Quality 0 wins first so a gray sword lands
+-- in Junk, not Gear — same precedence Retail uses.
 ------------------------------------------------------------------------
 
-local function itemFilterFlag(itemID, classID, subClassID, quality)
+local function itemFilterFlag(itemID, classID, quality)
 	if itemID == 6948 then return FLAG.HEARTHSTONE end
 	if quality == 0 then return FLAG.JUNK end
 	if classID == 12 then return FLAG.QUEST end
 	if classID == 2 or classID == 4 then return FLAG.GEAR end
 	if classID == 0 then return FLAG.CONSUMABLE end
-	if classID == 7 then return FLAG.TRADE_GOODS end
+	-- Recipes live with Trade Goods so a profession bag tagged Trade
+	-- Goods picks them up alongside the cloth / herbs / ore.
+	if classID == 7 or classID == 9 then return FLAG.TRADE_GOODS end
 	if classID == 5 then return FLAG.REAGENT end
-	if classID == 15 and subClassID == 5 then return FLAG.MOUNT end
-	if classID == 1 or classID == 6 or classID == 9 or classID == 13 or classID == 15 then
+	if classID == 1 or classID == 6 or classID == 13 or classID == 15 then
 		return FLAG.MISC
 	end
 	return 0
@@ -72,10 +77,7 @@ local function ensureDB()
 	SortedBagsDB = SortedBagsDB or {}
 	SortedBagsDB.ignored = SortedBagsDB.ignored or {}
 	SortedBagsDB.bagFlags = SortedBagsDB.bagFlags or {}
-	if SortedBagsDB.rightToLeft     == nil then SortedBagsDB.rightToLeft     = false end
-	if SortedBagsDB.lootRightToLeft == nil then SortedBagsDB.lootRightToLeft = false end
-	-- Drop the legacy category-priority order from <0.6 saves.
-	SortedBagsDB.categoryOrder = nil
+	if SortedBagsDB.rightToLeft == nil then SortedBagsDB.rightToLeft = false end
 end
 ns.ensureDB = ensureDB
 
@@ -222,12 +224,16 @@ local function itemAt(container, slot)
 	-- different link, which the server already treats as unstackable.
 	local key = link
 	local itemID = tonumber(strmatch(link, "item:(%d+)"))
-	local flag = itemFilterFlag(itemID, classID, subClassID, quality)
+	local flag = itemFilterFlag(itemID, classID, quality)
 
 	itemStacks[key] = stack or 1
 	itemFilterFlags[key] = flag
+	-- classID comes before subClassID so weapons (classID 2) sort ahead of
+	-- armor (classID 4) inside GEAR, and items inside MISC / JUNK group by
+	-- their underlying class (containers, projectiles, keys, …).
 	itemSortKeys[key] = {
 		FLAG_ORDER[flag] or FLAG_UNKNOWN_RANK,
+		classID or 0,
 		subClassID or 0,
 		-(quality or 0),
 		itemName,
@@ -254,15 +260,18 @@ local function buildPlan()
 	model, itemStacks, itemSpecialties, itemSortKeys, itemFilterFlags = {}, {}, {}, {}, {}
 	local counts = {}
 
-	local function insert(t, v)
-		if SortedBagsDB.rightToLeft then
-			tinsert(t, v)
-		else
-			tinsert(t, 1, v)
-		end
+	-- Container traversal order. rightToLeft now means "rightmost bag
+	-- first" (backpack, bag1, ...); off means "leftmost bag first"
+	-- (bag4, bag3, ..., backpack). Slots inside each bag are always
+	-- visited top-left → bottom-right so items end up in slot order.
+	local containerOrder = {}
+	if SortedBagsDB.rightToLeft then
+		for i = 1, #CONTAINERS do containerOrder[i] = CONTAINERS[i] end
+	else
+		for i = #CONTAINERS, 1, -1 do tinsert(containerOrder, CONTAINERS[i]) end
 	end
 
-	for _, container in ipairs(CONTAINERS) do
+	for _, container in ipairs(containerOrder) do
 		local specialty = containerSpecialty(container)
 		local bagFlags = ns.getBagFlags(container)
 		local n = C_Container.GetContainerNumSlots(container) or 0
@@ -281,7 +290,7 @@ local function buildPlan()
 				entry.count = info and info.stackCount or 1
 				counts[key] = (counts[key] or 0) + entry.count
 			end
-			insert(model, entry)
+			tinsert(model, entry)
 		end
 	end
 
@@ -292,13 +301,7 @@ local function buildPlan()
 	local function assign(slot, key)
 		local remaining = counts[key]
 		if not remaining or remaining <= 0 then return false end
-		local stack = itemStacks[key]
-		local take
-		if SortedBagsDB.rightToLeft and (remaining % stack) ~= 0 then
-			take = remaining % stack
-		else
-			take = math.min(remaining, stack)
-		end
+		local take = math.min(remaining, itemStacks[key])
 		slot.targetItem  = key
 		slot.targetCount = take
 		counts[key] = remaining - take
@@ -317,15 +320,27 @@ local function buildPlan()
 		end
 	end
 
-	-- Phase 2: per-flag fill in Retail's canonical order. Each
-	-- category-assigned bag claims its matching items before items can
-	-- spill into other bags.
-	for _, flag in ipairs(FLAG_DEFAULT_ORDER) do
-		for _, slot in ipairs(model) do
-			if not slot.specialty and not slot.targetItem
-				and bit.band(slot.bagFlags, flag) ~= 0 then
-				for _, key in ipairs(items) do
-					if itemFilterFlags[key] == flag and assign(slot, key) then break end
+	-- Phase 2: per-bag fill. Walk each tagged bag's flags in the
+	-- canonical FLAG_DEFAULT_ORDER, which puts Hearthstone first and
+	-- Misc/Mounts second — so those items always claim a bag's earliest
+	-- slots whenever the bag carries those tags. Slots inside the bag
+	-- fill top-left → bottom-right because they were inserted into the
+	-- model in slot 1..N order.
+	for _, container in ipairs(containerOrder) do
+		local bagFlags = ns.getBagFlags(container)
+		if bagFlags ~= 0 then
+			for _, flag in ipairs(FLAG_DEFAULT_ORDER) do
+				if bit.band(bagFlags, flag) ~= 0 then
+					for _, slot in ipairs(model) do
+						if slot.container == container
+							and not slot.specialty
+							and not slot.targetItem
+						then
+							for _, key in ipairs(items) do
+								if itemFilterFlags[key] == flag and assign(slot, key) then break end
+							end
+						end
+					end
 				end
 			end
 		end

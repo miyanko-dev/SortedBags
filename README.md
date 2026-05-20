@@ -27,18 +27,33 @@ Settings are stored in `SortedBagsDB`, saved per account.
 
 ## Right-click portrait menu
 
-Tick any combination of:
+Tick any combination of (listed in the same priority order the dropdown
+uses):
 
-- **Hearthstone** (always first so you can grab it without looking)
-- **Gear** — weapons and armor
-- **Consumable** — food, drink, potions, scrolls
-- **Trade Goods** — cloth, herbs, ore, leather, enchanting mats
+- **Hearthstone** — pinned to the bag's first slot so you can grab it
+  without looking
+- **Mount** — pinned to the bag's next slots, immediately after the
+  Hearthstone if both flags are set
 - **Reagent** — class spell components (Soul Shards, Symbol of Kings, Wild
-  Berries, Holy Candle, etc.)
-- **Junk** — gray-quality items
+  Berries, Holy Candle, Ankhs, etc.)
+- **Consumable** — food, drink, potions, scrolls
+- **Gear** — weapons and armor. Weapons always sort *before* armor inside
+  this bucket.
+- **Trade Goods** — cloth, herbs, ore, leather, enchanting dusts/essences,
+  **recipes** (classID 9 is rolled into this bucket so a profession bag
+  catches them alongside the mats they craft into).
 - **Quest**
-- **Mount**
-- **Miscellaneous** — recipes, keys, containers, projectiles, anything else
+- **Miscellaneous** — keys, containers, projectiles, and any other
+  classID-15 items (pets, holiday tokens, …). Projectiles in a quiver /
+  ammo pouch are always claimed by that bag first regardless of this flag.
+- **Junk** — gray-quality items. Junk wins over class buckets, so a gray
+  sword lands here rather than in Gear.
+
+Reagent and Trade Goods are deliberately separate. Reagent is the in-game
+item class for **spell components** that get consumed by abilities (Soul
+Shards, Sacred Candles, …). Trade Goods is the **profession-mats** class
+(cloth, leather, ore, herbs, enchanting mats, …). Enchanting dusts and
+essences live under Trade Goods → Enchanting subclass, not under Reagent.
 
 Below the categories sits an **Ignore Sorting** checkbox: tick it and the
 bag is excluded entirely (nothing moves in, nothing moves out). The
@@ -55,24 +70,31 @@ bag.
 1. **Specialty bags first** — quivers, soul bags, herb bags, enchanting
    bags, and ammo pouches take their matching items before anything else.
    This isn't configurable; it's a hardware constraint from the bag itself.
-2. **Per-flag fill in Retail's canonical order** — for each flag, items
-   matching it land in bags tagged with that flag. Order:
-   Hearthstone → Gear → Consumable → Trade Goods → Reagent → Junk → Quest
-   → Mount → Miscellaneous.
+2. **Per-bag fill** — each tagged bag claims its matching items. Within a
+   single bag, items land in the canonical order:
+   Hearthstone → Mount → Reagent → Consumable → Gear (weapons → armor)
+   → Trade Goods → Quest → Miscellaneous → Junk. Hearthstone and Mount
+   slots are effectively reserved whenever those flags are set on the bag
+   and the matching items exist.
 3. **Unassigned bags absorb everything else** — items without a matching
    tagged bag fill the remaining unassigned bags in default sort order.
 4. **Spillover** — if a category bag has empty slots left after step 2,
    leftover items from any category can spill into it.
 
-Within any single category, items sort by sub-class, then quality (highest
-first), then name.
+Within any single category, items sort by classID (weapons before armor in
+Gear; containers → projectiles → keys → other in Misc), then sub-class,
+then quality (highest first), then name. **Within every bag, items always
+fill top-left → bottom-right.**
 
 ## Options window (`/sb`)
 
-- **Sort right-to-left** — items pile from the rightmost slot leftward
-  (default fills right-to-left within each bag using the addon's
-  inherited convention).
-- **Loot fills right-to-left** — flips the native bag-fill cvar.
+- **Sort right-to-left** — controls *which bag fills first*, not the slot
+  order inside the bag. On: backpack first, then bag1 → bag4 (rightmost
+  → leftmost). Off (default): bag4 first, then bag3 → backpack (leftmost
+  → rightmost). Either way, each bag fills top-left → bottom-right.
+- **Loot fills right-to-left** — calls
+  `C_Container.SetInsertItemsLeftToRight(false)`. Uncheck to fill loot
+  left-to-right (`SetInsertItemsLeftToRight(true)`).
 
 The category-priority drag list from earlier versions is gone; assignment
 is per bag now.

@@ -12,10 +12,6 @@ local function classInfo(classID)
 	if GetItemClassInfo then return GetItemClassInfo(classID) end
 end
 
-local function subClassInfo(classID, subClassID)
-	if GetItemSubClassInfo then return GetItemSubClassInfo(classID, subClassID) end
-end
-
 local function ignoreLabel()
 	return BAG_FILTER_IGNORE or "Ignore Sorting"
 end
@@ -29,8 +25,7 @@ local function flagLabel(flag)
 	elseif flag == FLAG.REAGENT     then return classInfo(5)  or "Reagent"
 	elseif flag == FLAG.JUNK        then return BAG_FILTER_JUNK or "Junk"
 	elseif flag == FLAG.QUEST       then return classInfo(12) or "Quest"
-	elseif flag == FLAG.MOUNT       then return subClassInfo(15, 5) or "Mount"
-	elseif flag == FLAG.MISC        then return classInfo(15) or "Miscellaneous"
+	elseif flag == FLAG.MISC        then return "Misc / Mounts"
 	end
 	return tostring(flag)
 end
@@ -213,13 +208,16 @@ local function buildConfigPanel()
 	sortCheck:SetPoint("TOPLEFT", f, "TOPLEFT", 16, -34)
 
 	local lootCheck = makeCheckbox(f, "SortedBagsReverseLootCheck", "Loot fills right-to-left",
-		function() return SortedBagsDB.lootRightToLeft end,
-		function(v)
-			SortedBagsDB.lootRightToLeft = v
-			local ok = pcall(SetCVar, "bagSortAscending", v and "0" or "1")
-			if not ok then pcall(SetCVar, "lootBottomLeft", v and "0" or "1") end
-		end)
+		function() return not C_Container.GetInsertItemsLeftToRight() end,
+		function(v) C_Container.SetInsertItemsLeftToRight(not v) end)
 	lootCheck:SetPoint("TOPLEFT", sortCheck, "BOTTOMLEFT", 0, -2)
+
+	-- Re-read live state on every show — the user may have toggled loot
+	-- direction via /run or the native UI since the panel was built.
+	f:HookScript("OnShow", function()
+		sortCheck:SetChecked(SortedBagsDB.rightToLeft and true or false)
+		lootCheck:SetChecked(not C_Container.GetInsertItemsLeftToRight())
+	end)
 
 	configPanel = f
 	return f
