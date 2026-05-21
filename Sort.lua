@@ -158,8 +158,39 @@ local CONTAINERS
 local model, itemStacks, itemSpecialties, itemSortKeys, itemFilterFlags
 local touchedSlots
 local process
+local noticeShown
 local engine = CreateFrame("Frame", addonName .. "Engine", UIParent)
 engine:Hide()
+
+------------------------------------------------------------------------
+-- Combat abort. Two paths can stop a running sort:
+--   (a) the PLAYER_REGEN_DISABLED event handler — normal path, fires
+--       between frames before the next coroutine resume.
+--   (b) the InCombatLockdown check inside sortPass — covers the race
+--       where the coroutine notices combat mid-sweep before the event
+--       reaches us, so we don't wait a full sweep / yield to stop.
+-- Both call showCombatAbortNotice, which is idempotent per sort so the
+-- raid-warning fires exactly once. Bags are left in their partially-
+-- sorted state on purpose — no rollback. Any in-flight cursor item is
+-- dropped so the player can fight unobstructed.
+------------------------------------------------------------------------
+
+local function showCombatAbortNotice()
+	if noticeShown then return end
+	noticeShown = true
+	if CursorHasItem() then ClearCursor() end
+	RaidNotice_AddMessage(RaidWarningFrame, "Bag Sorting Stopped",
+		{ r = 1, g = 0.1, b = 0.1 })
+end
+
+local combatWatcher = CreateFrame("Frame")
+combatWatcher:RegisterEvent("PLAYER_REGEN_DISABLED")
+combatWatcher:SetScript("OnEvent", function()
+	if not process then return end
+	process = nil
+	engine:Hide()
+	showCombatAbortNotice()
+end)
 
 local function slotKey(container, position)
 	return container * 100 + position
@@ -426,6 +457,14 @@ local function sortPass()
 		complete, moved = true, false
 		touchedSlots = {}
 		for _, dst in ipairs(model) do
+			-- Combat short-circuits the sweep mid-iteration so we don't
+			-- ride out the rest of the slots before yielding. Returning
+			-- "complete" makes the outer coroutine exit; the notice is
+			-- idempotent so the event handler won't double-alert.
+			if InCombatLockdown() then
+				showCombatAbortNotice()
+				return true
+			end
 			if dst.targetItem and (dst.item ~= dst.targetItem or (dst.count or 0) < dst.targetCount) then
 				complete = false
 
@@ -493,10 +532,14 @@ function ns.Sort()
 	end
 	if #CONTAINERS == 0 then return end
 
+	noticeShown = false
 	process = coroutine.create(function()
 		while not buildPlan() do coroutine.yield() end
 		while true do
-			if InCombatLockdown() then return end
+			if InCombatLockdown() then
+				showCombatAbortNotice()
+				return
+			end
 			if sortPass() then return end
 			stackPass()
 			coroutine.yield()
@@ -513,8 +556,12 @@ engine:SetScript("OnUpdate", function(self)
 			geterrorhandler()(err)
 			process = nil
 			self:Hide()
+			return
 		end
 	end
+	-- The combat event handler can nil `process` mid-resume; guard so
+	-- the dead-check below doesn't call coroutine.status(nil).
+	if not process then self:Hide(); return end
 	if coroutine.status(process) == "dead" then
 		process = nil
 		self:Hide()

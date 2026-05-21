@@ -149,35 +149,53 @@ local function ensureBagMenu()
 end
 
 ------------------------------------------------------------------------
--- Portrait click overlay. Backpack: left-click sorts, right-click menu.
+-- Portrait click handler. Backpack: left-click sorts, right-click menu.
 -- Other bags: right-click menu only.
+--
+-- We bind directly to Blizzard's $parentPortraitButton instead of layering
+-- our own overlay on top: an overlay child with mouse enabled took OnEnter
+-- (tooltips worked) but, for reasons that aren't worth chasing, didn't
+-- deliver LeftButton OnClick reliably here, while RightButton did.
+-- PortraitButton is a regular Button with no OnClick of its own in the
+-- 1.15.x XML, so SetScript("OnClick") is a safe addition.
+--
+-- ContainerFrame1..13 are also a pool in Classic Era 1.15.x:
+-- GetOpenFrame() hands the first hidden frame to whichever bag opens
+-- next, so the same ContainerFrameN can host the backpack one show and
+-- bag #2 the next. That means we can't bake "is this the backpack?" into
+-- a closure at attach time — re-read frame:GetID() on every click / hover.
 ------------------------------------------------------------------------
 
 local function attachPortraitClick(frame)
 	if not frame or frame.SortedBagsPortraitHook then return end
-	local portrait = _G[frame:GetName() .. "Portrait"]
-	if not portrait then return end
-
-	local isBackpack = frame:GetID() == 0
-
-	-- Blizzard's PortraitButton has no OnClick but still consumes mouse input
-	-- (and its own OnEnter tooltip overrides ours). Disabling its mouse lets
-	-- our overlay button receive every click and lets our tooltip show through.
 	local pb = _G[frame:GetName() .. "PortraitButton"]
-	if pb and pb.EnableMouse then pb:EnableMouse(false) end
+	if not pb then return end
 
-	local btn = CreateFrame("Button", nil, frame)
-	btn:SetAllPoints(portrait)
-	btn:SetFrameLevel(frame:GetFrameLevel() + 5)
-	if isBackpack then
-		btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-	else
-		btn:RegisterForClicks("RightButtonUp")
-	end
+	pb:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
-	btn:SetScript("OnClick", function(self, button)
+	local function isBackpack() return frame:GetID() == 0 end
+
+	-- Dim overlay for hover/press feedback on the backpack only.
+	-- SetVertexColor on the native portrait texture is silently no-op'd in
+	-- Classic Era 1.15 (the C_Container.SetBagPortraitTexture pipeline
+	-- ignores subsequent Lua color changes), so paint a dim layer on top.
+	-- Masked to the same circular alpha Blizzard uses so the dim matches
+	-- the portrait socket.
+	local dim = pb:CreateTexture(nil, "OVERLAY")
+	dim:SetColorTexture(0, 0, 0, 1)
+	dim:SetAllPoints(pb)
+	dim:SetAlpha(0)
+	pcall(function()
+		local mask = pb:CreateMaskTexture()
+		mask:SetTexture("Interface\\CharacterFrame\\TempPortraitAlphaMask",
+			"CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+		mask:SetAllPoints(dim)
+		dim:AddMaskTexture(mask)
+	end)
+
+	pb:SetScript("OnClick", function(self, button)
 		if button == "LeftButton" then
-			ns.Sort()
+			if isBackpack() then ns.Sort() end
 			return
 		end
 		ensureBagMenu()
@@ -186,58 +204,36 @@ local function attachPortraitClick(frame)
 		ToggleDropDownMenu(1, nil, bagMenu, self, 0, 0)
 	end)
 
-	-- Translucent black overlay for hover/press feedback — only on the backpack,
-	-- since that's the one that actually acts as a sort button. Other bags just
-	-- get the right-click category menu and shouldn't visually behave like
-	-- buttons. SetVertexColor on the native portrait is silently no-op'd in
-	-- Classic Era 1.15 (the C-side C_Container.SetBagPortraitTexture pipeline
-	-- ignores subsequent Lua color changes), so we paint a thin dim layer on
-	-- top instead. Masked to the same circular alpha Blizzard uses so the dim
-	-- matches the portrait socket.
-	local dim
-	if isBackpack then
-		dim = btn:CreateTexture(nil, "OVERLAY")
-		dim:SetColorTexture(0, 0, 0, 1)
-		dim:SetAllPoints(btn)
-		dim:SetAlpha(0)
-		pcall(function()
-			local mask = btn:CreateMaskTexture()
-			mask:SetTexture("Interface\\CharacterFrame\\TempPortraitAlphaMask",
-				"CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
-			mask:SetAllPoints(dim)
-			dim:AddMaskTexture(mask)
-		end)
-	end
-
-	btn:SetScript("OnEnter", function(self)
-		if dim then dim:SetAlpha(0.3) end
+	pb:SetScript("OnEnter", function(self)
+		if isBackpack() then dim:SetAlpha(0.3) end
 		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-		if isBackpack then
-			GameTooltip:SetText("SortedBags")
+		GameTooltip:SetText("SortedBags")
+		if isBackpack() then
 			GameTooltip:AddLine("Left-click to sort.", 1, 1, 1, true)
 			GameTooltip:AddLine("Right-click for categories and options.", 1, 1, 1, true)
 		else
-			GameTooltip:SetText("SortedBags")
 			GameTooltip:AddLine("Right-click to assign categories.", 1, 1, 1, true)
 		end
 		GameTooltip:Show()
 	end)
-	btn:SetScript("OnLeave", function(self)
-		if dim then dim:SetAlpha(0) end
+	pb:SetScript("OnLeave", function()
+		dim:SetAlpha(0)
 		GameTooltip:Hide()
 	end)
 	-- OnMouseDown / OnMouseUp give a stronger "pressed" dim distinct from hover.
 	-- OnClick fires on release, so this feedback runs in parallel with sort/menu.
-	if isBackpack then
-		btn:SetScript("OnMouseDown", function(self)
-			dim:SetAlpha(0.55)
-		end)
-		btn:SetScript("OnMouseUp", function(self)
-			dim:SetAlpha(self:IsMouseOver() and 0.3 or 0)
-		end)
-	end
+	pb:SetScript("OnMouseDown", function()
+		if isBackpack() then dim:SetAlpha(0.55) end
+	end)
+	pb:SetScript("OnMouseUp", function(self)
+		if isBackpack() and self:IsMouseOver() then
+			dim:SetAlpha(0.3)
+		else
+			dim:SetAlpha(0)
+		end
+	end)
 
-	frame.SortedBagsPortraitHook = btn
+	frame.SortedBagsPortraitHook = true
 
 	-- Close our dropdown when the bag it belongs to is closed, otherwise
 	-- the menu lingers floating after the bag window disappears.
