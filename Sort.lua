@@ -183,6 +183,10 @@ local function showCombatAbortNotice()
 		{ r = 1, g = 0.1, b = 0.1 })
 end
 
+local function notify(msg)
+	UIErrorsFrame:AddMessage(msg, 1.0, 0.1, 0.1)
+end
+
 local combatWatcher = CreateFrame("Frame")
 combatWatcher:RegisterEvent("PLAYER_REGEN_DISABLED")
 combatWatcher:SetScript("OnEvent", function()
@@ -249,7 +253,15 @@ local function itemAt(container, slot)
 	if not link then return end
 
 	local itemName, _, quality, _, _, _, _, stack, _, _, _, classID, subClassID = GetItemInfo(link)
-	if not itemName then return end
+	if not itemName then
+		-- GetItemInfo cache miss (common just after login / zoning in
+		-- Classic Era). Return the link as an opaque key so the planner
+		-- pins the slot in place rather than mistaking it for empty and
+		-- shuffling another item on top.
+		itemStacks[link] = 1
+		itemFilterFlags[link] = 0
+		return link, true
+	end
 
 	-- Item link is the identity. Different enchant / random suffix means a
 	-- different link, which the server already treats as unstackable.
@@ -280,7 +292,7 @@ local function itemAt(container, slot)
 		end
 	end
 
-	return key
+	return key, false
 end
 
 ------------------------------------------------------------------------
@@ -313,13 +325,25 @@ local function buildPlan()
 				specialty = specialty,
 				bagFlags  = bagFlags,
 			}
-			local key = itemAt(container, slot)
+			local key, uncached = itemAt(container, slot)
 			if key then
 				local info = C_Container.GetContainerItemInfo(container, slot)
-				if info and info.isLocked then return false end
+				local locked = uncached or (info and info.isLocked)
 				entry.item  = key
 				entry.count = info and info.stackCount or 1
-				counts[key] = (counts[key] or 0) + entry.count
+				if locked then
+					-- Pin locked / uncached items in place so the planner
+					-- sorts around them. Classic Era can leave items
+					-- locked after a failed in-combat equip or a dismissed
+					-- BoE bind popup; the lock is server-side and only
+					-- clears on relog. The previous build aborted the
+					-- entire plan on any locked slot and retried forever,
+					-- which made the sort button look dead until relog.
+					entry.targetItem  = key
+					entry.targetCount = entry.count
+				else
+					counts[key] = (counts[key] or 0) + entry.count
+				end
 			end
 			tinsert(model, entry)
 		end
@@ -340,9 +364,11 @@ local function buildPlan()
 	end
 
 	-- Phase 1: specialty bags. Quivers / soul bags / etc. take their
-	-- matching items first; ignores the user's bagFlags.
+	-- matching items first; ignores the user's bagFlags. Skip slots that
+	-- already carry a targetItem (locked / uncached pins set above) so we
+	-- don't overwrite the in-place reservation.
 	for _, slot in ipairs(model) do
-		if slot.specialty then
+		if slot.specialty and not slot.targetItem then
 			for _, key in ipairs(items) do
 				if itemSpecialties[key] and itemSpecialties[key][slot.specialty] and assign(slot, key) then
 					break
@@ -394,8 +420,6 @@ local function buildPlan()
 			end
 		end
 	end
-
-	return true
 end
 
 ------------------------------------------------------------------------
@@ -516,13 +540,20 @@ end
 ------------------------------------------------------------------------
 
 function ns.Sort()
-	if process and coroutine.status(process) == "suspended" then return end
+	-- Treat a suspended process whose engine isn't actually running as
+	-- stale and fall through to a fresh sort. This guards against any
+	-- code path that nils the engine without nilling process — without
+	-- it, a stuck "in progress" state would silently swallow every click
+	-- until /reload.
+	if process and coroutine.status(process) == "suspended" and engine:IsShown() then
+		return
+	end
 
 	ensureDB()
 
 	local ok, reason = isSafeNow()
 	if not ok then
-		UIErrorsFrame:AddMessage(reason, 1.0, 0.1, 0.1)
+		notify(reason)
 		return
 	end
 
@@ -534,7 +565,7 @@ function ns.Sort()
 
 	noticeShown = false
 	process = coroutine.create(function()
-		while not buildPlan() do coroutine.yield() end
+		buildPlan()
 		while true do
 			if InCombatLockdown() then
 				showCombatAbortNotice()

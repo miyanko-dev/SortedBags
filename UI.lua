@@ -47,105 +47,208 @@ local function dimPortrait(frame)
 end
 
 ------------------------------------------------------------------------
--- Shared right-click dropdown on bag portraits
+-- Right-click popover panel on bag portraits.
+--
+-- We use a small native panel (BackdropTemplate + thin tooltip border,
+-- matching WhereToQuest/ChatScan's section style) populated with native
+-- UICheckButtonTemplate rows. MenuUtil context menus would be more compact
+-- but on Classic Era they suppress the unchecked checkbox box by design
+-- (see Blizzard_Menu/Vanilla/MenuVariants.lua), which loses the visible
+-- on/off cue. UICheckButtonTemplate keeps the boxed widget native players
+-- expect from the Chat Settings dialog.
 ------------------------------------------------------------------------
 
-local bagMenu, menuFrame, menuBag
+local PANEL_WIDTH = 200
+local PANEL_PAD_X = 12
+local PANEL_PAD_TOP = 10
+local PANEL_PAD_BOTTOM = 10
+local TITLE_GAP = 6
+local ROW_HEIGHT = 22
+local DIVIDER_GAP = 10
+local SECTION_LABEL_HEIGHT = 18
 
-local function buildBagMenu(_, level)
-	if not menuBag then return end
-	level = level or 1
+local panel
 
-	local info = UIDropDownMenu_CreateInfo()
-	info.text = "SortedBags"
-	info.isTitle = true
-	info.notCheckable = true
-	UIDropDownMenu_AddButton(info, level)
+local function newCheckRow(parent)
+	local cb = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
+	cb:SetSize(22, 22)
+	-- Native template anchors LEFT→RIGHT x=-2 calibrated for the 32px default
+	-- size where the texture's built-in whitespace yields the standard gap.
+	-- At 22px we re-anchor with an explicit 4px offset to match the rest of
+	-- the workspace (see WhereToQuest's range checkbox).
+	local label = cb.text or _G[(cb:GetName() or "") .. "Text"]
+		or cb:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	label:ClearAllPoints()
+	label:SetPoint("LEFT", cb, "RIGHT", 4, 0)
+	label:SetFontObject("GameFontHighlight")
+	cb.label = label
+	return cb
+end
+
+local function newDivider(parent)
+	local tex = parent:CreateTexture(nil, "ARTWORK")
+	tex:SetColorTexture(1, 1, 1, 0.08)
+	tex:SetHeight(1)
+	return tex
+end
+
+local function newSectionLabel(parent)
+	local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	fs:SetTextColor(0.85, 0.78, 0.55)
+	return fs
+end
+
+local function ensurePanel()
+	if panel then return panel end
+
+	panel = CreateFrame("Frame", "SortedBagsOptions", UIParent, "BackdropTemplate")
+	panel:SetFrameStrata("DIALOG")
+	panel:SetClampedToScreen(true)
+	panel:EnableMouse(true)
+	panel:SetBackdrop({
+		bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
+		edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+		tile = true, tileSize = 16, edgeSize = 16,
+		insets = { left = 3, right = 3, top = 3, bottom = 3 },
+	})
+	panel:SetBackdropColor(0.08, 0.08, 0.08, 0.92)
+	panel:SetBackdropBorderColor(0.4, 0.4, 0.4)
+	panel:SetWidth(PANEL_WIDTH)
+	panel:Hide()
+
+	panel.title = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	panel.title:SetPoint("TOP", panel, "TOP", 0, -PANEL_PAD_TOP)
+	panel.title:SetText("Sorted Bags")
+
+	panel.checkRows = {}
+	panel.dividers = {}
+	panel.sectionLabels = {}
+
+	-- Full-screen invisible catcher behind the panel. Any click outside the
+	-- panel itself hides the popover, mirroring MenuUtil's click-out behavior.
+	panel.catcher = CreateFrame("Button", nil, UIParent)
+	panel.catcher:SetAllPoints(UIParent)
+	panel.catcher:SetFrameStrata("FULLSCREEN_DIALOG")
+	panel.catcher:RegisterForClicks("AnyDown")
+	panel.catcher:SetScript("OnClick", function() panel:Hide() end)
+	panel.catcher:Hide()
+
+	-- Panel sits one strata above the catcher so its own clicks don't reach it.
+	panel:SetFrameStrata("FULLSCREEN_DIALOG")
+	panel:SetFrameLevel(panel.catcher:GetFrameLevel() + 10)
+
+	-- Escape closes the popover via Blizzard's standard special-frames list.
+	tinsert(UISpecialFrames, "SortedBagsOptions")
+
+	panel:SetScript("OnHide", function() panel.catcher:Hide() end)
+
+	return panel
+end
+
+local function showBagMenu(anchor, frame)
+	local p = ensurePanel()
+	local bag = frame:GetID()
+	p.parentFrame = frame
+
+	-- Hide all reusable widgets so successive opens with different row counts
+	-- don't leave orphan UI behind.
+	for _, cb in ipairs(p.checkRows) do cb:Hide() end
+	for _, d in ipairs(p.dividers) do d:Hide() end
+	for _, s in ipairs(p.sectionLabels) do s:Hide() end
+
+	local checkIdx, divIdx, labelIdx = 0, 0, 0
+	local y = -PANEL_PAD_TOP - TITLE_GAP - (p.title:GetStringHeight() or 14)
+
+	local function placeCheckRow(text, isChecked, onClick)
+		checkIdx = checkIdx + 1
+		local cb = p.checkRows[checkIdx]
+		if not cb then
+			cb = newCheckRow(p)
+			p.checkRows[checkIdx] = cb
+		end
+		cb:ClearAllPoints()
+		cb:SetPoint("TOPLEFT", p, "TOPLEFT", PANEL_PAD_X - 4, y)
+		cb.label:SetText(text)
+		cb:SetChecked(isChecked())
+		cb:SetScript("OnClick", function(self)
+			onClick(self:GetChecked() and true or false)
+		end)
+		cb:Show()
+		y = y - ROW_HEIGHT
+	end
+
+	local function placeDivider()
+		divIdx = divIdx + 1
+		local d = p.dividers[divIdx]
+		if not d then
+			d = newDivider(p)
+			p.dividers[divIdx] = d
+		end
+		y = y - DIVIDER_GAP / 2
+		d:ClearAllPoints()
+		d:SetPoint("LEFT", p, "LEFT", PANEL_PAD_X, y)
+		d:SetPoint("RIGHT", p, "RIGHT", -PANEL_PAD_X, y)
+		d:Show()
+		y = y - DIVIDER_GAP / 2
+	end
+
+	local function placeSectionLabel(text)
+		labelIdx = labelIdx + 1
+		local fs = p.sectionLabels[labelIdx]
+		if not fs then
+			fs = newSectionLabel(p)
+			p.sectionLabels[labelIdx] = fs
+		end
+		fs:ClearAllPoints()
+		fs:SetPoint("TOPLEFT", p, "TOPLEFT", PANEL_PAD_X, y - 2)
+		fs:SetText(text)
+		fs:Show()
+		y = y - SECTION_LABEL_HEIGHT
+	end
 
 	for _, flag in ipairs(ns.FLAG_DEFAULT_ORDER) do
 		local f = flag
-		info = UIDropDownMenu_CreateInfo()
-		info.text = flagLabel(f)
-		info.isNotRadio = true
-		info.keepShownOnClick = true
-		-- Function form so UIDropDownMenu_Refresh re-reads the saved state
-		-- after a click instead of using a stale boolean captured at build.
-		info.checked = function() return ns.hasBagFlag(menuBag, f) end
-		info.func = function(_, _, _, checked)
-			ns.setBagFlag(menuBag, f, checked)
-			dimPortrait(menuFrame)
-		end
-		UIDropDownMenu_AddButton(info, level)
+		placeCheckRow(flagLabel(f),
+			function() return ns.hasBagFlag(bag, f) end,
+			function(checked)
+				ns.setBagFlag(bag, f, checked)
+				dimPortrait(frame)
+			end)
 	end
 
-	-- Blank separator
-	info = UIDropDownMenu_CreateInfo()
-	info.text = ""
-	info.isTitle = true
-	info.notCheckable = true
-	info.disabled = true
-	UIDropDownMenu_AddButton(info, level)
+	placeDivider()
+	placeCheckRow(ignoreLabel(),
+		function() return ns.isIgnored(bag) end,
+		function(checked)
+			ns.setIgnored(bag, checked)
+			dimPortrait(frame)
+		end)
 
-	info = UIDropDownMenu_CreateInfo()
-	info.text = ignoreLabel()
-	info.isNotRadio = true
-	info.keepShownOnClick = true
-	info.checked = function() return ns.isIgnored(menuBag) end
-	info.func = function(_, _, _, checked)
-		ns.setIgnored(menuBag, checked)
-		dimPortrait(menuFrame)
-	end
-	UIDropDownMenu_AddButton(info, level)
-
-	-- Global options only on the backpack menu — they apply to everything,
-	-- so duplicating them on every bag would be noise.
-	if menuBag == 0 then
-		info = UIDropDownMenu_CreateInfo()
-		info.text = ""
-		info.isTitle = true
-		info.notCheckable = true
-		info.disabled = true
-		UIDropDownMenu_AddButton(info, level)
-
-		info = UIDropDownMenu_CreateInfo()
-		info.text = "General Options"
-		info.isTitle = true
-		info.notCheckable = true
-		UIDropDownMenu_AddButton(info, level)
-
-		info = UIDropDownMenu_CreateInfo()
-		info.text = "Sort right-to-left"
-		info.isNotRadio = true
-		info.keepShownOnClick = true
-		info.checked = function() return SortedBagsDB.rightToLeft and true or false end
-		info.func = function(_, _, _, checked)
-			SortedBagsDB.rightToLeft = checked and true or false
-		end
-		UIDropDownMenu_AddButton(info, level)
-
-		info = UIDropDownMenu_CreateInfo()
-		info.text = "Loot fills right-to-left"
-		info.isNotRadio = true
-		info.keepShownOnClick = true
-		info.checked = function() return not C_Container.GetInsertItemsLeftToRight() end
-		info.func = function(_, _, _, checked)
-			C_Container.SetInsertItemsLeftToRight(not checked)
-		end
-		UIDropDownMenu_AddButton(info, level)
+	-- Global options live on the backpack menu only — they apply to
+	-- everything, so duplicating them on every bag would be noise.
+	if bag == 0 then
+		placeDivider()
+		placeSectionLabel("General Options")
+		placeCheckRow("Sort right-to-left",
+			function() return SortedBagsDB.rightToLeft and true or false end,
+			function(checked)
+				SortedBagsDB.rightToLeft = checked
+			end)
+		placeCheckRow("Loot fills right-to-left",
+			function() return not C_Container.GetInsertItemsLeftToRight() end,
+			function(checked)
+				C_Container.SetInsertItemsLeftToRight(not checked)
+			end)
 	end
 
-	info = UIDropDownMenu_CreateInfo()
-	info.text = CLOSE or "Close"
-	info.notCheckable = true
-	info.func = function() CloseDropDownMenus() end
-	UIDropDownMenu_AddButton(info, level)
-end
+	y = y - PANEL_PAD_BOTTOM
+	p:SetHeight(-y)
 
-local function ensureBagMenu()
-	if bagMenu then return bagMenu end
-	bagMenu = CreateFrame("Frame", "SortedBagsBagMenu", UIParent, "UIDropDownMenuTemplate")
-	UIDropDownMenu_Initialize(bagMenu, buildBagMenu, "MENU")
-	return bagMenu
+	p:ClearAllPoints()
+	p:SetPoint("TOPLEFT", anchor, "BOTTOMRIGHT", 4, 0)
+
+	p.catcher:Show()
+	p:Show()
 end
 
 ------------------------------------------------------------------------
@@ -198,16 +301,13 @@ local function attachPortraitClick(frame)
 			if isBackpack() then ns.Sort() end
 			return
 		end
-		ensureBagMenu()
-		menuFrame = frame
-		menuBag   = frame:GetID()
-		ToggleDropDownMenu(1, nil, bagMenu, self, 0, 0)
+		showBagMenu(self, frame)
 	end)
 
 	pb:SetScript("OnEnter", function(self)
 		if isBackpack() then dim:SetAlpha(0.3) end
 		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-		GameTooltip:SetText("SortedBags")
+		GameTooltip:SetText("Sorted Bags")
 		if isBackpack() then
 			GameTooltip:AddLine("Left-click to sort.", 1, 1, 1, true)
 			GameTooltip:AddLine("Right-click for categories and options.", 1, 1, 1, true)
@@ -235,11 +335,11 @@ local function attachPortraitClick(frame)
 
 	frame.SortedBagsPortraitHook = true
 
-	-- Close our dropdown when the bag it belongs to is closed, otherwise
-	-- the menu lingers floating after the bag window disappears.
+	-- Close our popover when the bag it belongs to is closed, otherwise
+	-- the panel lingers floating after the bag window disappears.
 	frame:HookScript("OnHide", function(self)
-		if menuFrame == self then
-			CloseDropDownMenus()
+		if panel and panel:IsShown() and panel.parentFrame == self then
+			panel:Hide()
 		end
 	end)
 end
