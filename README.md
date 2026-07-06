@@ -106,15 +106,27 @@ untouched in both directions: nothing moves in, nothing moves out.
 
 ## Speed
 
-The engine batches as many moves as can run safely per frame instead of
-yielding after every single swap. Per-sweep slot tracking guarantees no
-slot is touched twice in one frame, so the model stays in sync with the
-server. A typical full sort completes in a few frames.
+The engine is event-driven: it batches every non-conflicting move into
+one wave, then sleeps until the server acknowledges the item locks
+(`ITEM_UNLOCKED` / `BAG_UPDATE_DELAYED`) before issuing the next wave —
+no per-frame sweeping, so sorting no longer costs FPS. Within a wave,
+sources are indexed by item (one scan instead of one scan per slot),
+partial stacks merge in parallel with sort moves, and swaps prefer
+pairs where both slots end up correct, halving the lock round trips on
+gear-heavy inventories. Total time is bounded by your latency times the
+longest move chain, typically a handful of waves.
 
 ## Safety
 
 Sorting refuses to start while in combat, on the cursor, or with the
 merchant, bank, trade, mail, or auction windows open.
+
+Every move verifies the drop actually landed before updating the
+engine's model (an empty-looking slot can still be server-locked for a
+moment and silently reject the drop). If a sort makes no progress for
+five seconds — a permanently locked item, or bags rearranged mid-sort —
+it stops with a "sorting stalled" message instead of spinning; clicking
+sort again replans from the live bag state.
 
 ## Files
 

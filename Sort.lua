@@ -150,6 +150,16 @@ local SPECIALTY = {
 	  items = arrayToSet({765, 785, 1401, 2263, 2447, 2449, 2450, 2452, 2453, 3355, 3356, 3357, 3358, 3369, 3818, 3819, 3820, 3821, 4625, 5013, 5056, 5168, 8831, 8836, 8838, 8839, 8845, 8846, 11018, 11020, 11022, 11024, 11040, 11514, 11951, 11952, 13463, 13464, 13465, 13466, 13467, 13468, 16205, 16208, 17034, 17035, 17036, 17037, 17038, 17760, 18297, 19727, 22094, 22147, 22710, 22785, 22786, 22787, 22788, 22789, 22790, 22791, 22792, 22793, 22794, 22795, 22797, 23329, 23501, 23788, 24245, 24246, 24401, 31300, 32468, 34465, 8153, 10286, 19726, 21886, 22575}) },
 }
 
+-- Bag itemID → specialty index, so specialty detection is one inventory
+-- lookup instead of comparing the bag name against every container's
+-- GetItemInfo (which silently fails on item-cache misses).
+local SPECIALTY_BY_BAG_ITEM = {}
+for idx, info in ipairs(SPECIALTY) do
+	for _, itemID in ipairs(info.containers) do
+		SPECIALTY_BY_BAG_ITEM[itemID] = idx
+	end
+end
+
 ------------------------------------------------------------------------
 -- Sort state
 ------------------------------------------------------------------------
@@ -159,6 +169,8 @@ local model, itemStacks, itemSpecialties, itemSortKeys, itemFilterFlags
 local touchedSlots
 local process
 local noticeShown
+local resumeSignal, resumeFallback = false, 0
+local lastMoveAt = 0
 local engine = CreateFrame("Frame", addonName .. "Engine", UIParent)
 engine:Hide()
 
@@ -239,13 +251,10 @@ end
 
 local function containerSpecialty(container)
 	if container == 0 then return end
-	local name = C_Container.GetBagName(container)
-	if not name then return end
-	for idx, info in ipairs(SPECIALTY) do
-		for _, itemID in ipairs(info.containers) do
-			if name == GetItemInfo(itemID) then return idx end
-		end
-	end
+	local invSlot = C_Container.ContainerIDToInventoryID(container)
+	local bagItemID = invSlot and GetInventoryItemID("player", invSlot)
+	if not bagItemID then return end
+	return SPECIALTY_BY_BAG_ITEM[bagItemID]
 end
 
 local function itemAt(container, slot)
@@ -451,6 +460,18 @@ local function move(src, dst)
 
 	C_Container.PickupContainerItem(dst.container, dst.position)
 
+	-- Empty-but-locked destination: GetContainerItemInfo returns nil for
+	-- empty slots, so the isLocked check above can't see a lock that's
+	-- still pending from a move that just emptied it. The client rejects
+	-- the drop and leaves the source item on the cursor — put it back and
+	-- report failure instead of recording a swap that never happened.
+	-- (Occupied slots are covered by the dstInfo.isLocked check.)
+	if not dstInfo and CursorHasItem() then
+		C_Container.PickupContainerItem(src.container, src.position)
+		if CursorHasItem() then ClearCursor() end
+		return false
+	end
+
 	-- Overflow / different-item swap: put the cursor remainder back.
 	if CursorHasItem() then
 		C_Container.PickupContainerItem(src.container, src.position)
@@ -468,6 +489,7 @@ local function move(src, dst)
 		src.count, dst.count = dst.count, src.count
 	end
 
+	lastMoveAt = GetTime()
 	return true
 end
 
@@ -475,63 +497,93 @@ end
 -- Sort / Stack passes
 ------------------------------------------------------------------------
 
-local function sortPass()
-	local complete, moved
-	repeat
-		complete, moved = true, false
-		touchedSlots = {}
-		for _, dst in ipairs(model) do
-			-- Combat short-circuits the sweep mid-iteration so we don't
-			-- ride out the rest of the slots before yielding. Returning
-			-- "complete" makes the outer coroutine exit; the notice is
-			-- idempotent so the event handler won't double-alert.
-			if InCombatLockdown() then
-				showCombatAbortNotice()
-				return true
-			end
-			if dst.targetItem and (dst.item ~= dst.targetItem or (dst.count or 0) < dst.targetCount) then
-				complete = false
-
-				local sources, rank = {}, {}
-				for _, src in ipairs(model) do
-					local srcOK = src.item == dst.targetItem
-						and src ~= dst
-						and not (dst.item and src.specialty and not (itemSpecialties[dst.item] and itemSpecialties[dst.item][src.specialty]))
-						and not (src.targetItem and src.item == src.targetItem and src.count <= src.targetCount)
-					if srcOK then
-						rank[src] = math.abs(src.count - dst.targetCount + (dst.item == dst.targetItem and dst.count or 0))
-						tinsert(sources, src)
-					end
-				end
-				sort(sources, function(a, b) return rank[a] < rank[b] end)
-
-				for _, src in ipairs(sources) do
-					if move(src, dst) then
-						moved = true
-						break
-					end
-				end
-			end
-		end
-		coroutine.yield()
-	until complete or not moved
-	return complete
-end
-
-local function stackPass()
-	touchedSlots = {}
+-- Merge partial stacks that aren't sitting in their planned slot. Runs
+-- inside every sweep and shares its touchedSlots, so merges execute in
+-- parallel with sort moves instead of waiting for the sort to block —
+-- merged stacks become clean sources for the next wave.
+local function mergeStacks()
 	for _, src in ipairs(model) do
-		if src.item and src.count < itemStacks[src.item] and src.item ~= src.targetItem then
+		if src.item and src.count < itemStacks[src.item] and src.item ~= src.targetItem
+			and not touchedSlots[slotKey(src.container, src.position)]
+		then
 			for _, dst in ipairs(model) do
 				if dst ~= src
 					and dst.item == src.item
 					and dst.count < itemStacks[dst.item]
 					and dst.item ~= dst.targetItem
 				then
-					if move(src, dst) then return end
+					if move(src, dst) then break end
 				end
 			end
 		end
+	end
+end
+
+local function sortPass()
+	while true do
+		-- Combat check once per sweep: a sweep runs synchronously, so
+		-- InCombatLockdown can't flip mid-iteration. The notice is
+		-- idempotent so the event handler won't double-alert.
+		if InCombatLockdown() then
+			showCombatAbortNotice()
+			return
+		end
+
+		local complete = true
+		touchedSlots = {}
+
+		-- Index candidate sources by item once per sweep instead of
+		-- rescanning the whole model for every destination. Slots mutated
+		-- mid-sweep are always in touchedSlots, so stale entries are
+		-- rejected at use time — same outcome as a fresh scan.
+		local sourcesByItem = {}
+		for _, src in ipairs(model) do
+			if src.item and not (src.targetItem and src.item == src.targetItem and src.count <= src.targetCount) then
+				local list = sourcesByItem[src.item]
+				if not list then
+					list = {}
+					sourcesByItem[src.item] = list
+				end
+				tinsert(list, src)
+			end
+		end
+
+		for _, dst in ipairs(model) do
+			if dst.targetItem and (dst.item ~= dst.targetItem or (dst.count or 0) < dst.targetCount) then
+				complete = false
+
+				local candidates = sourcesByItem[dst.targetItem]
+				if candidates and not touchedSlots[slotKey(dst.container, dst.position)] then
+					local sources, rank = {}, {}
+					for _, src in ipairs(candidates) do
+						local srcOK = src ~= dst
+							and not touchedSlots[slotKey(src.container, src.position)]
+							and not (dst.item and src.specialty and not (itemSpecialties[dst.item] and itemSpecialties[dst.item][src.specialty]))
+						if srcOK then
+							-- Count distance first (splits/merges stay minimal
+							-- for stackables), then prefer a mutual swap (src
+							-- wants exactly what dst holds): one move settles
+							-- two slots. For gear every distance is 0, so the
+							-- swap preference decides there and cuts the lock
+							-- round trips on gear-heavy inventories.
+							local mutual = (src.targetItem and src.targetItem == dst.item) and 0 or 1
+							rank[src] = math.abs(src.count - dst.targetCount + (dst.item == dst.targetItem and dst.count or 0)) * 2 + mutual
+							tinsert(sources, src)
+						end
+					end
+					sort(sources, function(a, b) return rank[a] < rank[b] end)
+
+					for _, src in ipairs(sources) do
+						if move(src, dst) then break end
+					end
+				end
+			end
+		end
+
+		mergeStacks()
+
+		if complete then return end
+		coroutine.yield()
 	end
 end
 
@@ -564,23 +616,43 @@ function ns.Sort()
 	if #CONTAINERS == 0 then return end
 
 	noticeShown = false
+	resumeSignal, resumeFallback = true, 0
+	lastMoveAt = GetTime()
 	process = coroutine.create(function()
 		buildPlan()
-		while true do
-			if InCombatLockdown() then
-				showCombatAbortNotice()
-				return
-			end
-			if sortPass() then return end
-			stackPass()
-			coroutine.yield()
-		end
+		sortPass()
 	end)
 	engine:Show()
 end
 
-engine:SetScript("OnUpdate", function(self)
+-- After a batch of moves, nothing can progress until the server acks a
+-- lock release, so resuming every frame just burns CPU on no-op sweeps.
+-- ITEM_UNLOCKED / BAG_UPDATE_DELAYED mark exactly those acks; the 0.25s
+-- fallback rescues the sort if an expected event never arrives.
+engine:RegisterEvent("ITEM_UNLOCKED")
+engine:RegisterEvent("BAG_UPDATE_DELAYED")
+engine:SetScript("OnEvent", function() resumeSignal = true end)
+
+engine:SetScript("OnUpdate", function(self, elapsed)
 	if not process then self:Hide(); return end
+
+	resumeFallback = resumeFallback + elapsed
+	if not resumeSignal and resumeFallback < 0.25 then return end
+	resumeSignal, resumeFallback = false, 0
+
+	-- A healthy sort moves something every lock round trip. Five seconds
+	-- with zero moves means the plan can't be reached (mid-sort user
+	-- interference, permanently locked slot); abort with a message
+	-- instead of sweeping forever — the next click replans from live
+	-- bag state.
+	if GetTime() - lastMoveAt > 5 then
+		process = nil
+		self:Hide()
+		if CursorHasItem() then ClearCursor() end
+		notify("Bag sorting stalled, sort again to retry")
+		return
+	end
+
 	if coroutine.status(process) == "suspended" then
 		local ok, err = coroutine.resume(process)
 		if not ok then
