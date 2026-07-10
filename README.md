@@ -19,6 +19,11 @@ etc.
 - Open the bags (`B`). A small sort icon sits to the left of the gear icon
   under the backpack's close button. Click it to sort, or type `/sortbags`
   (alias `/sortedbags`).
+- With the bank window open, sorting also sorts the bank (the base bank
+  slots and all bank bags). Bags and bank sort independently, no items are
+  deposited or withdrawn. Bank bags take category assignments through the
+  same right-click portrait menu. Toggle via "Also Sort Bank" in the
+  backpack's right-click menu.
 - The gear icon (or `/sb`) opens the options window.
 - **Right-click any bag's portrait** (the round icon at the top-left of an
   open bag window) to open the category menu.
@@ -34,15 +39,15 @@ uses):
   without looking
 - **Mount** — pinned to the bag's next slots, immediately after the
   Hearthstone if both flags are set
-- **Reagent** — class spell components (Soul Shards, Symbol of Kings, Wild
+- **Reagents** — class spell components (Soul Shards, Symbol of Kings, Wild
   Berries, Holy Candle, Ankhs, etc.)
-- **Consumable** — food, drink, potions, scrolls
+- **Consumables** — food, drink, potions, scrolls
 - **Gear** — weapons and armor. Weapons always sort *before* armor inside
   this bucket.
 - **Trade Goods** — cloth, herbs, ore, leather, enchanting dusts/essences,
   **recipes** (classID 9 is rolled into this bucket so a profession bag
   catches them alongside the mats they craft into).
-- **Quest**
+- **Quest Items**
 - **Miscellaneous** — keys, containers, projectiles, and any other
   classID-15 items (pets, holiday tokens, …). Projectiles in a quiver /
   ammo pouch are always claimed by that bag first regardless of this flag.
@@ -55,7 +60,7 @@ Shards, Sacred Candles, …). Trade Goods is the **profession-mats** class
 (cloth, leather, ore, herbs, enchanting mats, …). Enchanting dusts and
 essences live under Trade Goods → Enchanting subclass, not under Reagent.
 
-Below the categories sits an **Ignore Sorting** checkbox: tick it and the
+Below the categories sits an **Ignore Bag** checkbox: tick it and the
 bag is excluded entirely (nothing moves in, nothing moves out). The
 portrait dims to gray.
 
@@ -88,11 +93,11 @@ fill top-left → bottom-right.**
 
 ## Options window (`/sb`)
 
-- **Sort right-to-left** — controls *which bag fills first*, not the slot
+- **Sort Right to Left** — controls *which bag fills first*, not the slot
   order inside the bag. On: backpack first, then bag1 → bag4 (rightmost
   → leftmost). Off (default): bag4 first, then bag3 → backpack (leftmost
   → rightmost). Either way, each bag fills top-left → bottom-right.
-- **Loot fills right-to-left** — calls
+- **Loot Right to Left** — calls
   `C_Container.SetInsertItemsLeftToRight(false)`. Uncheck to fill loot
   left-to-right (`SetInsertItemsLeftToRight(true)`).
 
@@ -119,7 +124,10 @@ longest move chain, typically a handful of waves.
 ## Safety
 
 Sorting refuses to start while in combat, on the cursor, or with the
-merchant, bank, trade, mail, or auction windows open.
+trade or auction windows open. Merchant, mailbox, and bank are fine:
+sorting only picks up and places items, never the "use" action that
+sells, attaches, or deposits them. Closing the bank mid-sort stops the sort
+immediately.
 
 Every move verifies the drop actually landed before updating the
 engine's model (an empty-looking slot can still be server-locked for a

@@ -2,7 +2,7 @@
 ## Title: Sorted Bags
 ## Notes: Sorts player bags into Retail-style category-assigned slots. Right-click a bag portrait to assign.
 ## Author: Marco Vrinssen
-## Version: 0.7.0
+## Version: 0.8.0
 ## SavedVariablesPerCharacter: SortedBagsDB
 
 Sort.lua

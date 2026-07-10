@@ -5,6 +5,14 @@ SortedBags = ns
 local BAG_CONTAINERS = {0, 1, 2, 3, 4}
 ns.BAG_CONTAINERS = BAG_CONTAINERS
 
+-- Bank base container (-1) plus the six bank bag slots (5..10). Only
+-- sorted while the bank window is open — moves are server-rejected
+-- otherwise.
+local BANK_CONTAINERS = {BANK_CONTAINER or -1}
+for i = 1, (NUM_BANKBAGSLOTS or 6) do
+	tinsert(BANK_CONTAINERS, (NUM_BAG_SLOTS or 4) + i)
+end
+
 ------------------------------------------------------------------------
 -- Bag category flags. A bag can carry any combination. Bit values are
 -- persisted in SortedBagsDB.bagFlags — don't change them. 0x080 is
@@ -78,6 +86,7 @@ local function ensureDB()
 	SortedBagsDB.ignored = SortedBagsDB.ignored or {}
 	SortedBagsDB.bagFlags = SortedBagsDB.bagFlags or {}
 	if SortedBagsDB.rightToLeft == nil then SortedBagsDB.rightToLeft = false end
+	if SortedBagsDB.sortBank == nil then SortedBagsDB.sortBank = true end
 end
 ns.ensureDB = ensureDB
 
@@ -168,6 +177,7 @@ local CONTAINERS
 local model, itemStacks, itemSpecialties, itemSortKeys, itemFilterFlags
 local touchedSlots
 local process
+local sortingBank = false
 local noticeShown
 local resumeSignal, resumeFallback = false, 0
 local lastMoveAt = 0
@@ -208,6 +218,19 @@ combatWatcher:SetScript("OnEvent", function()
 	showCombatAbortNotice()
 end)
 
+-- Walking away from the bank mid-sort: every further bank move is
+-- server-rejected, so stop immediately instead of letting the stall
+-- guard spin for five seconds.
+local bankWatcher = CreateFrame("Frame")
+bankWatcher:RegisterEvent("BANKFRAME_CLOSED")
+bankWatcher:SetScript("OnEvent", function()
+	if not process or not sortingBank then return end
+	process = nil
+	engine:Hide()
+	if CursorHasItem() then ClearCursor() end
+	notify("Bank closed, sorting stopped")
+end)
+
 local function slotKey(container, position)
 	return container * 100 + position
 end
@@ -217,12 +240,12 @@ end
 ------------------------------------------------------------------------
 
 local function isSafeNow()
+	-- Merchant / mailbox / bank are safe: sorting only ever calls
+	-- PickupContainerItem, and selling / attaching / depositing happens
+	-- exclusively through UseContainerItem, which we never call.
 	if InCombatLockdown() then return false, "Cannot sort in combat" end
 	if CursorHasItem() then return false, "Drop the item on your cursor first" end
-	if MerchantFrame and MerchantFrame:IsShown() then return false, "Close the merchant first" end
-	if BankFrame and BankFrame:IsShown() then return false, "Close the bank first" end
 	if TradeFrame and TradeFrame:IsShown() then return false, "Cannot sort during trade" end
-	if MailFrame and MailFrame:IsShown() then return false, "Close the mailbox first" end
 	if AuctionFrame and AuctionFrame:IsShown() then return false, "Close the auction house first" end
 	return true
 end
@@ -250,7 +273,8 @@ end
 ------------------------------------------------------------------------
 
 local function containerSpecialty(container)
-	if container == 0 then return end
+	-- Backpack (0) and bank base (-1) aren't inventory items.
+	if container <= 0 then return end
 	local invSlot = C_Container.ContainerIDToInventoryID(container)
 	local bagItemID = invSlot and GetInventoryItemID("player", invSlot)
 	if not bagItemID then return end
@@ -609,18 +633,31 @@ function ns.Sort()
 		return
 	end
 
-	CONTAINERS = {}
-	for _, bag in ipairs(BAG_CONTAINERS) do
-		if not ns.isIgnored(bag) then tinsert(CONTAINERS, bag) end
+	local function activeContainers(list)
+		local out = {}
+		for _, bag in ipairs(list) do
+			if not ns.isIgnored(bag) then tinsert(out, bag) end
+		end
+		return out
 	end
-	if #CONTAINERS == 0 then return end
+
+	-- Bags and bank sort as separate groups so items never cross the
+	-- bag/bank boundary — sorting must not deposit or withdraw.
+	local groups = {activeContainers(BAG_CONTAINERS)}
+	sortingBank = SortedBagsDB.sortBank and BankFrame and BankFrame:IsShown() or false
+	if sortingBank then tinsert(groups, activeContainers(BANK_CONTAINERS)) end
 
 	noticeShown = false
 	resumeSignal, resumeFallback = true, 0
 	lastMoveAt = GetTime()
 	process = coroutine.create(function()
-		buildPlan()
-		sortPass()
+		for _, group in ipairs(groups) do
+			if #group > 0 then
+				CONTAINERS = group
+				buildPlan()
+				sortPass()
+			end
+		end
 	end)
 	engine:Show()
 end
@@ -631,6 +668,9 @@ end
 -- fallback rescues the sort if an expected event never arrives.
 engine:RegisterEvent("ITEM_UNLOCKED")
 engine:RegisterEvent("BAG_UPDATE_DELAYED")
+-- Bank base slots (container -1) signal through PLAYERBANKSLOTS_CHANGED
+-- rather than BAG_UPDATE_DELAYED.
+engine:RegisterEvent("PLAYERBANKSLOTS_CHANGED")
 engine:SetScript("OnEvent", function() resumeSignal = true end)
 
 engine:SetScript("OnUpdate", function(self, elapsed)
