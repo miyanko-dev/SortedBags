@@ -208,6 +208,11 @@ end
 local function notify(msg)
 	UIErrorsFrame:AddMessage(msg, 1.0, 0.1, 0.1)
 end
+ns.notify = notify
+
+function ns.IsSorting()
+	return process ~= nil
+end
 
 local combatWatcher = CreateFrame("Frame")
 combatWatcher:RegisterEvent("PLAYER_REGEN_DISABLED")

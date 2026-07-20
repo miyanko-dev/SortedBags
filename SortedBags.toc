@@ -6,4 +6,5 @@
 ## SavedVariablesPerCharacter: SortedBagsDB
 
 Sort.lua
+Cleanup.lua
 UI.lua
