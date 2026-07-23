@@ -127,7 +127,7 @@ local function attachPortraitClick(frame)
 	local pb = _G[frame:GetName() .. "PortraitButton"]
 	if not pb then return end
 
-	pb:RegisterForClicks("LeftButtonUp", "RightButtonUp", "MiddleButtonUp")
+	pb:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
 	local function isBackpack() return frame:GetID() == 0 end
 
@@ -154,10 +154,6 @@ local function attachPortraitClick(frame)
 			if isBackpack() then ns.Sort() end
 			return
 		end
-		if button == "MiddleButton" then
-			ns.DeleteCheapestJunk()
-			return
-		end
 		showBagMenu(self, frame)
 	end)
 
@@ -168,11 +164,9 @@ local function attachPortraitClick(frame)
 			GameTooltip:SetText("Sort Bags")
 			GameTooltip:AddLine("Left Click: Sort Bags", 1, 1, 1, true)
 			GameTooltip:AddLine("Right Click: Bag Categories & Options", 1, 1, 1, true)
-			GameTooltip:AddLine("Middle Click: Delete Cheapest Junk Item", 1, 1, 1, true)
 		else
 			GameTooltip:SetText("Sorted Bags")
 			GameTooltip:AddLine("Right Click: Bag Categories", 1, 1, 1, true)
-			GameTooltip:AddLine("Middle Click: Delete Cheapest Junk Item", 1, 1, 1, true)
 		end
 		GameTooltip:Show()
 	end)
