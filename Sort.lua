@@ -157,6 +157,17 @@ local sortingBank = false
 local noticeShown
 local resumeSignal, resumeFallback = false, 0
 local lastMoveAt = 0
+
+-- Time-slice the coroutine to dodge the client's "script ran too long" watchdog: one sweep over bags plus bank is O(slots²) in container API calls, far too much for a single execution slice. OnUpdate stamps sliceStart before every resume; yielding true asks for an immediate next-frame resume, since a pure budget break has no item-unlock event coming.
+local SLICE_BUDGET = 0.005
+local sliceStart = 0
+
+local function checkSlice()
+    if GetTimePreciseSec() - sliceStart > SLICE_BUDGET then
+        coroutine.yield(true)
+    end
+end
+
 local engine = CreateFrame("Frame", addonName .. "Engine", UIParent)
 engine:Hide()
 
@@ -296,6 +307,7 @@ local function buildPlan()
         local bagFlags = ns.GetBagFlags(container)
         local n = C_Container.GetContainerNumSlots(container) or 0
         for slot = 1, n do
+            checkSlice()
             local entry = {
                 container = container,
                 position  = slot,
@@ -336,6 +348,7 @@ local function buildPlan()
 
     -- Phase 1: specialty bags. Quivers / soul bags / etc. take their matching items first; ignores the user's bagFlags. Skip slots that already carry a targetItem (locked / uncached pins set above) so we don't overwrite the in-place reservation.
     for _, slot in ipairs(model) do
+        checkSlice()
         if slot.specialty and not slot.targetItem then
             for _, key in ipairs(items) do
                 if itemSpecialties[key] and itemSpecialties[key][slot.specialty] and assign(slot, key) then
@@ -352,6 +365,7 @@ local function buildPlan()
             for _, flag in ipairs(FLAG_DEFAULT_ORDER) do
                 if bit.band(bagFlags, flag) ~= 0 then
                     for _, slot in ipairs(model) do
+                        checkSlice()
                         if slot.container == container
                             and not slot.specialty
                             and not slot.targetItem
@@ -368,6 +382,7 @@ local function buildPlan()
 
     -- Phase 3: unassigned bags absorb whatever's left, in default sort order.
     for _, slot in ipairs(model) do
+        checkSlice()
         if not slot.specialty and not slot.targetItem and slot.bagFlags == 0 then
             for _, key in ipairs(items) do
                 if assign(slot, key) then break end
@@ -377,6 +392,7 @@ local function buildPlan()
 
     -- Phase 4: spillover — still-empty category slots take anything left.
     for _, slot in ipairs(model) do
+        checkSlice()
         if not slot.specialty and not slot.targetItem then
             for _, key in ipairs(items) do
                 if assign(slot, key) then break end
@@ -439,6 +455,7 @@ end
 -- Merge partial stacks that aren't sitting in their planned slot. Runs inside every sweep and shares its touchedSlots, so merges execute in parallel with sort moves instead of waiting for the sort to block — merged stacks become clean sources for the next wave.
 local function mergeStacks()
     for _, src in ipairs(model) do
+        checkSlice()
         if src.item and src.count < itemStacks[src.item] and src.item ~= src.targetItem
             and not touchedSlots[slotKey(src.container, src.position)]
         then
@@ -480,6 +497,7 @@ local function sortPass()
         end
 
         for _, dst in ipairs(model) do
+            checkSlice()
             if dst.targetItem and (dst.item ~= dst.targetItem or (dst.count or 0) < dst.targetCount) then
                 complete = false
 
@@ -580,13 +598,16 @@ engine:SetScript("OnUpdate", function(self, elapsed)
     end
 
     if coroutine.status(process) == "suspended" then
-        local ok, err = coroutine.resume(process)
+        sliceStart = GetTimePreciseSec()
+        local ok, budgetYield = coroutine.resume(process)
         if not ok then
-            geterrorhandler()(err)
+            geterrorhandler()(budgetYield)
             process = nil
             self:Hide()
             return
         end
+        -- A budget yield has no unlock event coming, so resume next frame instead of waiting out the 0.25s fallback.
+        if budgetYield then resumeSignal = true end
     end
     -- The combat event handler can nil `process` mid-resume; guard so the dead-check below doesn't call coroutine.status(nil).
     if not process then self:Hide(); return end
