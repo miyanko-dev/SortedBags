@@ -1,4 +1,4 @@
-## Interface: 11508
+## Interface: 11509
 ## Title: Sorted Bags
 ## Notes: Sorts player bags into Retail-style category-assigned slots. Right-click a bag portrait to assign.
 ## Author: Marco Vrinssen
